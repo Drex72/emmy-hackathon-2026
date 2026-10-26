@@ -412,6 +412,19 @@ class Machine:
             np.bitwise_or.at(mask, key, (np.uint64(1) << self.lane[idx].astype(np.uint64)))
             W(ops[0], mask[key].astype(np.uint32))
             return
+        if op == "shfl.sync.idx.b32":
+            a = self.regs[ops[1]]
+            src_lane = R(ops[2], "u32").astype(np.int64) & 31
+            member = R(ops[4], "u32").astype(np.uint64)
+            src = idx - self.lane[idx] + src_lane
+            executing = np.zeros(self.T, dtype=bool)
+            executing[idx] = True
+            srcc = np.clip(src, 0, self.T - 1)
+            bad = (src >= self.T) | ((member >> src_lane.astype(np.uint64)) & 1 == 0) | ~executing[srcc] | (self.cta[srcc] != self.cta[idx])
+            if bad.any():
+                self.issue("shfl reads a lane that is not executing or not in the member mask")
+            W(ops[0], a[srcc])
+            return
         if op == "shfl.sync.bfly.b32":
             a = self.regs[ops[1]]
             off = int(ops[2], 0)
