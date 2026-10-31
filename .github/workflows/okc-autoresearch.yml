@@ -1,122 +1,129 @@
-name: OKC Autoresearch Wave 1
+name: OKC Five-Board Autoresearch
 
 on:
   push:
     branches: [okc-autoresearch]
     paths:
-      - ".github/workflows/okc-autoresearch.yml"
-      - "okc-autoresearch/**"
+      - "okc-autoresearch/TRIGGER2"
   workflow_dispatch:
 
 permissions:
   contents: read
-  issues: write
+
+concurrency:
+  group: okc-five-board-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  wave1:
+  first-wave:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore first-wave executor
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base64 -d okc-autoresearch/first_wave.py.gz.b64 | gzip -d > "$RUNNER_TEMP/first_wave.py"
+          python -m py_compile "$RUNNER_TEMP/first_wave.py"
+          sha256sum "$RUNNER_TEMP/first_wave.py"
 
       - name: Install OKC CLI
         shell: bash
         run: |
           set -Eeuo pipefail
           curl --retry 5 --retry-all-errors -fsSL https://openkernelchallenge.dev/install.sh | sh
-          if ! command -v okc >/dev/null 2>&1; then
+          CANDIDATE="$(command -v okc || true)"
+          if [ -z "$CANDIDATE" ]; then
             CANDIDATE="$(find "$HOME" -type f -name okc -perm -111 2>/dev/null | head -1 || true)"
-            if [ -z "$CANDIDATE" ]; then
-              echo "okc binary not found after installer" >&2
-              exit 1
-            fi
-            echo "$(dirname "$CANDIDATE")" >> "$GITHUB_PATH"
-            sudo ln -sf "$CANDIDATE" /usr/local/bin/okc
           fi
+          if [ -z "$CANDIDATE" ]; then
+            echo "okc binary not found after installer" >&2
+            exit 1
+          fi
+          echo "$(dirname "$CANDIDATE")" >> "$GITHUB_PATH"
+          sudo ln -sf "$CANDIDATE" /usr/local/bin/okc
           okc --version || okc version || true
 
-      - name: Device login
-        id: login
+      - name: Device login (encrypted handshake)
         shell: bash
         run: |
           set -Eeuo pipefail
-          LOG=/tmp/okc-login.log
+          LOG="$RUNNER_TEMP/okc-login.log"
+          PUB="$RUNNER_TEMP/device-code-public.pem"
+          cat > "$PUB" <<'PUBKEY'
+          -----BEGIN PUBLIC KEY-----
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuJTvLVFd/+Al+Pf6EQ1p
+          dBVh7Su0fFYn19br+Vp/M7WXEnXW4VgUqOwmR2GgnkcWpYCv8qrAMcaOu7I42+FB
+          OXcxCz+sr12kekp7AX5WLkKzGJ41XRdLqs57RHOUZXjzOyC4kxQ3XSVyB4r7ECb5
+          7+lCl7WbYe2oeSTEHYFxPVkcVS2yKpVq0//bhtKtsKYS13ADT51jwMod6iYBjarb
+          eAHtvjodnG2HinL0JvKmWLgBlBNewLK117A4M9gX2pc5PLw/nMcP5xOsOelsWyIC
+          1fNId8yryJLK+L/fzAr23dRtodZvGDn1lmd7n1eVCgjRVeTGUy5hCqo7bk/sVbR3
+          tQIDAQAB
+          -----END PUBLIC KEY-----
+          PUBKEY
+          sed -i 's/^          //' "$PUB"
           : > "$LOG"
-          # PTY keeps the CLI's device-flow output flushed while it polls GitHub.
-          script -q -f -c "okc login" "$LOG" &
+
+          # The CLI first asks for explicit acceptance of the official rules.
+          # Keep all CLI output off public stdout; only the encrypted device code is printed.
+          script -q -f -c "bash -lc 'printf \"y\\n\" | okc login'" "$LOG" >/dev/null 2>&1 &
           LOGIN_PID=$!
+
           CODE=""
-          for _ in $(seq 1 120); do
-            CODE="$(tr -d '\r' < "$LOG" | sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' | grep -Eo '[A-Z0-9]{4}-[A-Z0-9]{4}' | tail -1 || true)"
+          for _ in $(seq 1 180); do
+            CODE="$(tr -d '\r' < "$LOG" \
+              | sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+              | grep -Eo '[A-Z0-9]{4}-[A-Z0-9]{4}' \
+              | tail -1 || true)"
             if [ -n "$CODE" ]; then break; fi
             if ! kill -0 "$LOGIN_PID" 2>/dev/null; then break; fi
             sleep 1
           done
+
           if [ -z "$CODE" ]; then
-            echo "Could not obtain a device code. Login log:"
-            cat "$LOG"
+            echo "LOGIN_STAGE=failed_before_device_code"
+            # Redact anything shaped like a device code before diagnostics.
+            tr -d '\r' < "$LOG" \
+              | sed -E 's/[A-Z0-9]{4}-[A-Z0-9]{4}/[REDACTED-DEVICE-CODE]/g' \
+              | tail -80
             kill "$LOGIN_PID" 2>/dev/null || true
             exit 1
           fi
-          ISSUE_URL="$(gh issue create --repo "$GITHUB_REPOSITORY"             --title "OKC device login — Wave 1"             --body "Approve the temporary OKC runner login at https://github.com/login/device using code **$CODE**. This is a one-time device code; do not post passwords or tokens. The runner is waiting for approval.")"
-          ISSUE_NUM="${ISSUE_URL##*/}"
-          echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
-          echo "Device code posted to $ISSUE_URL"
+
+          CIPHER="$(
+            printf '%s' "$CODE" \
+              | openssl pkeyutl -encrypt -pubin -inkey "$PUB" -pkeyopt rsa_padding_mode:oaep \
+              | base64 -w0
+          )"
+          unset CODE
+          echo "LOGIN_STAGE=awaiting_device_authorization"
+          echo "OKC_DEVICE_CODE_CIPHERTEXT=$CIPHER"
+          echo "DEVICE_URL=https://github.com/login/device"
+
           if ! wait "$LOGIN_PID"; then
-            echo "okc login failed"; cat "$LOG"; exit 1
+            echo "LOGIN_STAGE=authorization_failed_or_expired"
+            exit 1
           fi
-          gh issue close "$ISSUE_NUM" --repo "$GITHUB_REPOSITORY" --comment "OKC runner authenticated. Wave 1 checks are starting." || true
+          rm -f "$LOG" "$PUB"
+          echo "LOGIN_STAGE=authorized"
 
-      - name: Build controls and candidates
+      - name: Run five-board crossover campaign
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p okc-autoresearch/controls okc-autoresearch/candidates/attention okc-autoresearch/candidates/moe logs
-          curl --retry 5 --retry-all-errors -fsSL             https://raw.githubusercontent.com/alygg77/okc-muse-spark-kernels/main/kernels/muse_attention_decode.py             -o okc-autoresearch/controls/muse_attention_decode.py
-          curl --retry 5 --retry-all-errors -fsSL             https://raw.githubusercontent.com/alygg77/okc-muse-spark-kernels/main/kernels/muse_moe_w4a16.py             -o okc-autoresearch/controls/muse_moe_w4a16.py
-          cp okc-autoresearch/controls/muse_attention_decode.py okc-autoresearch/controls/A00-attention-control.py
-          cp okc-autoresearch/controls/muse_moe_w4a16.py okc-autoresearch/controls/M00-moe-control.py
-          printf '\n# okc-autoresearch-control-wave1\n' >> okc-autoresearch/controls/A00-attention-control.py
-          printf '\n# okc-autoresearch-control-wave1\n' >> okc-autoresearch/controls/M00-moe-control.py
-          python okc-autoresearch/scripts/make_attention_split_variants.py             okc-autoresearch/controls/muse_attention_decode.py okc-autoresearch/candidates/attention
-          python okc-autoresearch/scripts/make_moe_m1_route_variant.py             okc-autoresearch/controls/muse_moe_w4a16.py okc-autoresearch/candidates/moe/M06-m1-route.py
-          python -m py_compile             okc-autoresearch/controls/*.py             okc-autoresearch/candidates/attention/*.py             okc-autoresearch/candidates/moe/*.py
-          sha256sum okc-autoresearch/controls/*.py okc-autoresearch/candidates/**/*.py | tee logs/hashes.txt
+          cd "$RUNNER_TEMP"
+          python first_wave.py
 
-      - name: Run five unscored H200 checks
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          : > logs/summary.txt
-          run_check() {
-            label="$1"; problem="$2"; file="$3"
-            echo "===== $label :: $problem :: $file =====" | tee -a logs/summary.txt
-            set +e
-            timeout 2700 okc check "$problem" "$file" 2>&1 | tee "logs/$label.log"
-            rc=${PIPESTATUS[0]}
-            set -e
-            echo "$label rc=$rc" | tee -a logs/summary.txt
-            # A bad experimental candidate must not stop the rest of the campaign.
-            return 0
-          }
-          run_check A00-control muse_attention_decode okc-autoresearch/controls/A00-attention-control.py
-          run_check A06-d1-16 muse_attention_decode okc-autoresearch/candidates/attention/A06-d1-16.py
-          run_check A06-v1-16 muse_attention_decode okc-autoresearch/candidates/attention/A06-v1-16.py
-          run_check M00-control muse_moe_w4a16 okc-autoresearch/controls/M00-moe-control.py
-          run_check M06-m1-route muse_moe_w4a16 okc-autoresearch/candidates/moe/M06-m1-route.py
-          find . -type f -path '*/profiles/*' -print | tee logs/profile-files.txt || true
-
-      - name: Upload campaign evidence
+      - name: Upload H200 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: okc-wave1-${{ github.run_id }}
+          name: okc-five-board-${{ github.run_id }}
           retention-days: 7
           if-no-files-found: warn
           path: |
-            logs/
-            **/profiles/
-            okc-autoresearch/controls/
-            okc-autoresearch/candidates/
+            ${{ runner.temp }}/okc-run/results/
+            ${{ runner.temp }}/okc-run/logs/
+            ${{ runner.temp }}/okc-run/sources/
