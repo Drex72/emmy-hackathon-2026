@@ -4,20 +4,23 @@ on:
   push:
     branches: [okc-autoresearch]
     paths:
-      - "okc-autoresearch/TRIGGER3"
+      - "okc-autoresearch/TRIGGER4"
   workflow_dispatch:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: okc-five-board-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   first-wave:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,12 +104,17 @@ jobs:
           echo "LOGIN_STAGE=awaiting_device_authorization"
           echo "OKC_DEVICE_CODE_CIPHERTEXT=$CIPHER"
           echo "DEVICE_URL=https://github.com/login/device"
+          export GH_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+          ISSUE_URL="$(gh issue create --repo "$GITHUB_REPOSITORY"             --title "OKC encrypted device login — run $GITHUB_RUN_ID"             --body "Temporary OKC authorization handoff for run **$GITHUB_RUN_ID**.\n\nDevice URL: https://github.com/login/device\n\nEncrypted code (RSA-OAEP):\n\n\`\`\`\n$CIPHER\n\`\`\`\n\nOnly the ephemeral private key held by the research session can decrypt this.")"
+          ISSUE_NUM="${ISSUE_URL##*/}"
+          echo "DEVICE_CIPHER_ISSUE=$ISSUE_URL"
 
           if ! wait "$LOGIN_PID"; then
             echo "LOGIN_STAGE=authorization_failed_or_expired"
             exit 1
           fi
           rm -f "$LOG" "$PUB"
+          gh issue close "$ISSUE_NUM" --repo "$GITHUB_REPOSITORY" --comment "Device authorization completed; the H200 checks are starting." || true
           echo "LOGIN_STAGE=authorized"
 
       - name: Run five-board crossover campaign
