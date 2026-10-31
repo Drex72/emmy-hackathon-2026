@@ -4,7 +4,7 @@ on:
   push:
     branches: [okc-autoresearch]
     paths:
-      - "okc-autoresearch/TRIGGER2"
+      - "okc-autoresearch/TRIGGER3"
   workflow_dispatch:
 
 permissions:
@@ -68,7 +68,7 @@ jobs:
 
           # The CLI first asks for explicit acceptance of the official rules.
           # Keep all CLI output off public stdout; only the encrypted device code is printed.
-          script -q -f -c "bash -lc 'printf \"y\\n\" | okc login'" "$LOG" >/dev/null 2>&1 &
+          { printf 'y\\n'; sleep 900; } | script -q -f -c "okc login" "$LOG" >/dev/null 2>&1 &
           LOGIN_PID=$!
 
           CODE=""
