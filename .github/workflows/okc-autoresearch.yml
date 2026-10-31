@@ -71,7 +71,7 @@ jobs:
 
           # The CLI first asks for explicit acceptance of the official rules.
           # Keep all CLI output off public stdout; only the encrypted device code is printed.
-          { printf 'y\\n'; sleep 900; } | script -q -f -c "okc login" "$LOG" >/dev/null 2>&1 &
+          { printf 'y\n'; sleep 900; } | script -q -f -c "okc login" "$LOG" >/dev/null 2>&1 &
           LOGIN_PID=$!
 
           CODE=""
